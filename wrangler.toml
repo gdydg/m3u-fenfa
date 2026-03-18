@@ -1,0 +1,9 @@
+name = "m3ugc"
+main = "src/index.js"
+compatibility_date = "2023-10-25"
+
+# 定时任务：每天凌晨 3:00 (UTC) 自动抓取更新直播源
+[triggers]
+crons = ["*/10 * * * *"]
+
+

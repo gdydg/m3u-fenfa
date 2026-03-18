@@ -1,0 +1,13 @@
+{
+  "name": "m3u-proxy-worker",
+  "version": "1.0.0",
+  "description": "A Cloudflare Worker for M3U proxy with token auth and IP limits.",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^3.0.0"
+  }
+}
