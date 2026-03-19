@@ -54,6 +54,7 @@
    * 添加 `DEFAULT_ADMIN_PASS`。
    * `LINUXDO_CLIENT_ID`：填入你在 Linux DO 申请的 Client ID。(可选）
    * `LINUXDO_CLIENT_SECRET`：填入你在 Linux DO 申请的 Client Secret。（可选）
+   * 你的回调地址是：`https://你的worker域名.workers.dev/api/auth/linuxdo/callback`
 5. 点击底部的 **保存并部署**。
 
 ### 第四步：设置自动更新 (Cron 定时任务)
