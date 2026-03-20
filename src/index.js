@@ -25,13 +25,12 @@ export default {
       return new Response(renderAdminPage(), { headers: { 'Content-Type': 'text/html;charset=UTF-8' } });
     }
 
-    // --- 5. Linux DO OAuth2 登录路由 ---
-    if (path === '/api/auth/linuxdo') {
-      return handleLinuxDoAuth(request, env, url);
-    }
-    if (path === '/api/auth/linuxdo/callback') {
-      return await handleLinuxDoCallback(request, env, url);
-    }
+    // --- 5. OAuth2 登录路由 ---
+    if (path === '/api/auth/linuxdo') return handleLinuxDoAuth(request, env, url);
+    if (path === '/api/auth/linuxdo/callback') return await handleLinuxDoCallback(request, env, url);
+    
+    if (path === '/api/auth/nodeloc') return handleNodeLocAuth(request, env, url);
+    if (path === '/api/auth/nodeloc/callback') return await handleNodeLocCallback(request, env, url);
 
     // --- 6. 用户端 API (注册/登录/看板操作) ---
     if (path.startsWith('/api/user/')) {
@@ -70,30 +69,23 @@ async function getUserSession(request, env) {
 // ================= Linux DO OAuth2 逻辑 =================
 
 function handleLinuxDoAuth(request, env, url) {
-  if (!env.LINUXDO_CLIENT_ID) {
-    return new Response('未配置 LINUXDO_CLIENT_ID', { status: 500 });
-  }
+  if (!env.LINUXDO_CLIENT_ID) return new Response('未配置 LINUXDO_CLIENT_ID', { status: 500 });
   const redirectUri = url.origin + '/api/auth/linuxdo/callback';
-  const state = crypto.randomUUID(); // 简易防 CSRF
-  
-  // 构造授权链接
+  const state = crypto.randomUUID();
   const authUrl = 'https://connect.linux.do/oauth2/authorize' + 
     '?client_id=' + env.LINUXDO_CLIENT_ID + 
     '&response_type=code' + 
     '&redirect_uri=' + encodeURIComponent(redirectUri) + 
     '&state=' + state;
-    
   return Response.redirect(authUrl, 302);
 }
 
 async function handleLinuxDoCallback(request, env, url) {
   const code = url.searchParams.get('code');
-  if (!code) return new Response('Authorization Failed: No code provided', { status: 400 });
-
+  if (!code) return new Response('Authorization Failed', { status: 400 });
   const redirectUri = url.origin + '/api/auth/linuxdo/callback';
 
   try {
-    // 1. 获取 Access Token
     const tokenRes = await fetch('https://connect.linux.do/oauth2/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -105,36 +97,91 @@ async function handleLinuxDoCallback(request, env, url) {
         redirect_uri: redirectUri
       })
     });
-    
     if (!tokenRes.ok) throw new Error('Failed to fetch access token');
     const tokenData = await tokenRes.json();
-    const accessToken = tokenData.access_token;
 
-    // 2. 获取用户信息
     const userRes = await fetch('https://connect.linux.do/api/user', {
-      headers: { 'Authorization': 'Bearer ' + accessToken }
+      headers: { 'Authorization': 'Bearer ' + tokenData.access_token }
     });
-    
     if (!userRes.ok) throw new Error('Failed to fetch user info');
     const userData = await userRes.json();
     
-    // 我们使用 Linux DO 的 username 作为系统内的用户名
     const username = 'linuxdo_' + userData.username;
-
-    // 3. 生成 Session 自动登录 (存活 7 天)
     const sessionId = crypto.randomUUID();
     await env.IPTV_KV.put('session:' + sessionId, username, { expirationTtl: 604800 });
     
     return new Response(null, {
       status: 302,
-      headers: {
-        'Location': '/',
-        'Set-Cookie': 'session_id=' + sessionId + '; Path=/; Max-Age=604800; HttpOnly'
-      }
+      headers: { 'Location': '/', 'Set-Cookie': 'session_id=' + sessionId + '; Path=/; Max-Age=604800; HttpOnly' }
     });
-
   } catch (err) {
     return new Response('OAuth Error: ' + err.message, { status: 500 });
+  }
+}
+
+// ================= NodeLoc OAuth2 逻辑 =================
+
+function handleNodeLocAuth(request, env, url) {
+  if (!env.NODELOC_CLIENT_ID) return new Response('未配置 NODELOC_CLIENT_ID', { status: 500 });
+  const redirectUri = url.origin + '/api/auth/nodeloc/callback';
+  const state = crypto.randomUUID();
+  
+  // 更新为官方的授权端点
+  const authUrl = 'https://www.nodeloc.com/oauth-provider/authorize' + 
+    '?client_id=' + env.NODELOC_CLIENT_ID + 
+    '&response_type=code' + 
+    '&redirect_uri=' + encodeURIComponent(redirectUri) + 
+    '&state=' + state;
+  return Response.redirect(authUrl, 302);
+}
+
+async function handleNodeLocCallback(request, env, url) {
+  const code = url.searchParams.get('code');
+  if (!code) return new Response('Authorization Failed', { status: 400 });
+  const redirectUri = url.origin + '/api/auth/nodeloc/callback';
+
+  try {
+    // 更新为官方的 Token 获取端点
+    const tokenRes = await fetch('https://www.nodeloc.com/oauth-provider/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' },
+      body: new URLSearchParams({
+        client_id: env.NODELOC_CLIENT_ID,
+        client_secret: env.NODELOC_CLIENT_SECRET,
+        grant_type: 'authorization_code',
+        code: code,
+        redirect_uri: redirectUri
+      })
+    });
+    if (!tokenRes.ok) throw new Error('Failed to fetch access token');
+    const tokenData = await tokenRes.json();
+
+    // 更新为官方的用户信息获取端点
+    const userRes = await fetch('https://www.nodeloc.com/oauth-provider/userinfo', {
+      headers: { 
+        'Authorization': 'Bearer ' + tokenData.access_token,
+        'Accept': 'application/json'
+      }
+    });
+    if (!userRes.ok) throw new Error('Failed to fetch user info');
+    const userData = await userRes.json();
+    
+    // 兼容取值，提取用户名
+    let rawUsername = userData.username || userData.preferred_username || userData.name || userData.sub || 'user_' + Math.random().toString(36).substr(2, 5);
+    if (userData.data && userData.data.attributes) {
+      rawUsername = userData.data.attributes.username;
+    }
+    
+    const username = 'nodeloc_' + rawUsername;
+    const sessionId = crypto.randomUUID();
+    await env.IPTV_KV.put('session:' + sessionId, username, { expirationTtl: 604800 });
+    
+    return new Response(null, {
+      status: 302,
+      headers: { 'Location': '/', 'Set-Cookie': 'session_id=' + sessionId + '; Path=/; Max-Age=604800; HttpOnly' }
+    });
+  } catch (err) {
+    return new Response('NodeLoc OAuth Error: ' + err.message, { status: 500 });
   }
 }
 
@@ -320,7 +367,16 @@ async function handleUserAPI(request, env, url) {
       const limitStr = await env.IPTV_KV.get('token:' + t);
       if (limitStr) {
         const ips = await env.IPTV_KV.get('ips:' + t, 'json') || [];
-        result.push({ token: t, limit: parseInt(limitStr), used: ips.length });
+        
+        const keyList = await env.IPTV_KV.list({ prefix: 'token:' + t });
+        const keyInfo = keyList.keys.find(k => k.name === 'token:' + t);
+        let expireText = '永久有效';
+        if (keyInfo && keyInfo.expiration) {
+          const d = new Date(keyInfo.expiration * 1000);
+          expireText = d.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+        }
+
+        result.push({ token: t, limit: parseInt(limitStr), used: ips.length, expireText: expireText });
       }
     }
     return Response.json(result);
@@ -439,275 +495,256 @@ async function handleAdminAPI(request, env, url) {
 // ================= 前端页面渲染 =================
 
 function renderLoginPage() {
-  return `<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-  <meta charset="UTF-8">
-  <title>系统登录/注册</title>
-  <style>
-    body { font-family: system-ui; background: #f4f4f5; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
-    .card { background: white; padding: 2rem; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); width: 300px; text-align: center; }
-    input { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
-    button { color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer; width: 100%; margin-top: 10px; }
-    .btn-login { background: #3b82f6; }
-    .btn-reg { background: #10b981; }
-    .btn-linuxdo { background: #232323; margin-top: 20px; display: flex; align-items: center; justify-content: center; gap: 8px; }
-    .divider { margin: 20px 0; color: #999; font-size: 14px; display: flex; align-items: center; }
-    .divider::before, .divider::after { content: ""; flex: 1; border-bottom: 1px solid #eee; }
-    .divider::before { margin-right: 10px; } .divider::after { margin-left: 10px; }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <h2>IPTV 订阅系统</h2>
-    <input type="text" id="user" placeholder="用户名">
-    <input type="password" id="pass" placeholder="密码">
-    <button class="btn-login" onclick="doAction('login')">登录</button>
-    <button class="btn-reg" onclick="doAction('register')">注册新账号</button>
-    
-    <div class="divider">或者</div>
-    
-    <button class="btn-linuxdo" onclick="window.location.href='/api/auth/linuxdo'">
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="white"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-2-5.5l7-4.5-7-4.5v9z"/></svg>
-      使用 Linux DO 登录
-    </button>
-  </div>
-  <script>
-    async function doAction(action) {
-      const u = document.getElementById('user').value;
-      const p = document.getElementById('pass').value;
-      if(!u || !p) return alert('请输入账密');
-      
-      const res = await fetch('/api/user/' + action, {
-        method: 'POST', body: JSON.stringify({username: u, password: p})
-      });
-      const data = await res.json();
-      if(data.success) {
-        if(action === 'register') alert('注册成功，请登录！');
-        else window.location.href = '/';
-      } else {
-        alert(data.msg);
-      }
-    }
-  </script>
-</body>
-</html>`;
+  return '<!DOCTYPE html>\n' +
+  '<html lang="zh-CN">\n' +
+  '<head>\n' +
+  '  <meta charset="UTF-8">\n' +
+  '  <title>系统登录/注册</title>\n' +
+  '  <style>\n' +
+  '    body { font-family: system-ui; background: #f4f4f5; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }\n' +
+  '    .card { background: white; padding: 2rem; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); width: 300px; text-align: center; }\n' +
+  '    input { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }\n' +
+  '    button { color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer; width: 100%; margin-top: 10px; font-weight: bold; }\n' +
+  '    .btn-login { background: #3b82f6; }\n' +
+  '    .btn-reg { background: #10b981; }\n' +
+  '    .oauth-btn { margin-top: 15px; display: flex; align-items: center; justify-content: center; gap: 8px; font-weight: normal; }\n' +
+  '    .btn-linuxdo { background: #232323; }\n' +
+  '    .btn-nodeloc { background: #007bff; }\n' +
+  '    .divider { margin: 20px 0; color: #999; font-size: 14px; display: flex; align-items: center; }\n' +
+  '    .divider::before, .divider::after { content: ""; flex: 1; border-bottom: 1px solid #eee; }\n' +
+  '    .divider::before { margin-right: 10px; } .divider::after { margin-left: 10px; }\n' +
+  '  </style>\n' +
+  '</head>\n' +
+  '<body>\n' +
+  '  <div class="card">\n' +
+  '    <h2>IPTV 订阅系统</h2>\n' +
+  '    <input type="text" id="user" placeholder="用户名">\n' +
+  '    <input type="password" id="pass" placeholder="密码">\n' +
+  '    <button class="btn-login" onclick="doAction(\'login\')">登录</button>\n' +
+  '    <button class="btn-reg" onclick="doAction(\'register\')">注册新账号</button>\n' +
+  '    <div class="divider">或者</div>\n' +
+  '    <button class="oauth-btn btn-linuxdo" onclick="window.location.href=\'/api/auth/linuxdo\'">\n' +
+  '      <svg width="20" height="20" viewBox="0 0 24 24" fill="white"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-2-5.5l7-4.5-7-4.5v9z"/></svg>\n' +
+  '      使用 Linux DO 登录\n' +
+  '    </button>\n' +
+  '    <button class="oauth-btn btn-nodeloc" onclick="window.location.href=\'/api/auth/nodeloc\'">\n' +
+  '      <svg width="20" height="20" viewBox="0 0 24 24" fill="white"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm8 11h-2v3H8v-3H6v5h12v-5zm0-9H6v5h2V6h8v3h2V4z"/></svg>\n' +
+  '      使用 NodeLoc 登录\n' +
+  '    </button>\n' +
+  '  </div>\n' +
+  '  <script>\n' +
+  '    async function doAction(action) {\n' +
+  '      const u = document.getElementById(\'user\').value;\n' +
+  '      const p = document.getElementById(\'pass\').value;\n' +
+  '      if(!u || !p) return alert(\'请输入账密\');\n' +
+  '      const res = await fetch(\'/api/user/\' + action, {\n' +
+  '        method: \'POST\', body: JSON.stringify({username: u, password: p})\n' +
+  '      });\n' +
+  '      const data = await res.json();\n' +
+  '      if(data.success) {\n' +
+  '        if(action === \'register\') alert(\'注册成功，请登录！\');\n' +
+  '        else window.location.href = \'/\';\n' +
+  '      } else {\n' +
+  '        alert(data.msg);\n' +
+  '      }\n' +
+  '    }\n' +
+  '  </script>\n' +
+  '</body>\n' +
+  '</html>';
 }
 
 function renderUserDashboard(username) {
-  // 此处与上个版本相同，渲染用户仪表盘
-  return `<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-  <meta charset="UTF-8">
-  <title>用户控制台</title>
-  <style>
-    body { font-family: system-ui; background: #f9fafb; margin: 0; padding: 20px; }
-    .container { max-width: 800px; margin: auto; }
-    .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 20px; }
-    input { padding: 8px; border: 1px solid #ddd; border-radius: 4px; }
-    button { background: #3b82f6; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; }
-    button.warning { background: #f59e0b; }
-    table { width: 100%; border-collapse: collapse; margin-top: 15px; }
-    th, td { padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }
-    .header { display: flex; justify-content: space-between; align-items: center; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <div class="header">
-      <h1>欢迎回来, ` + username + `</h1>
-      <button class="warning" onclick="logout()">退出登录</button>
-    </div>
-    
-    <div class="card">
-      <h2>绑定新 Token</h2>
-      <p>请输入管理员分发给您的 Token 激活码进行绑定：</p>
-      <input type="text" id="bindToken" placeholder="输入 Token">
-      <button onclick="bind()">立即绑定</button>
-    </div>
-
-    <div class="card">
-      <h2>我的订阅列表</h2>
-      <table>
-        <thead><tr>
-          <th>Token</th>
-          <th>状态/限制</th>
-          <th>M3U 订阅链接</th>
-          <th>操作</th>
-        </tr></thead>
-        <tbody id="list"></tbody>
-      </table>
-    </div>
-  </div>
-
-  <script>
-    async function loadData() {
-      const res = await fetch('/api/user/tokens');
-      const data = await res.json();
-      const tbody = document.getElementById('list');
-      let html = '';
-      for(let i=0; i<data.length; i++) {
-        let t = data[i];
-        let limitTxt = t.limit === 0 ? '无限 IP' : (t.used + ' / ' + t.limit + ' IP');
-        let subLink = window.location.origin + '/sub?token=' + t.token;
-        
-        html += '<tr>' +
-          '<td>' + t.token + '</td>' +
-          '<td>' + limitTxt + '</td>' +
-          '<td><button onclick="copy(\\'' + subLink + '\\')">复制订阅链接</button></td>' +
-          '<td><button class="warning" onclick="resetIp(\\'' + t.token + '\\')">解除IP封锁</button></td>' +
-        '</tr>';
-      }
-      tbody.innerHTML = html;
-    }
-
-    async function bind() {
-      const t = document.getElementById('bindToken').value;
-      if(!t) return;
-      const res = await fetch('/api/user/bind', { method: 'POST', body: JSON.stringify({token: t}) });
-      const data = await res.json();
-      if(data.success) { alert('绑定成功'); document.getElementById('bindToken').value=''; loadData(); }
-      else alert(data.msg);
-    }
-
-    async function resetIp(token) {
-      await fetch('/api/user/reset_ip', { method: 'POST', body: JSON.stringify({token: token}) });
-      alert('已重置该 Token 的 IP 记录');
-      loadData();
-    }
-
-    async function logout() {
-      await fetch('/api/user/logout', { method: 'POST' });
-      window.location.href = '/login';
-    }
-
-    function copy(text) {
-      navigator.clipboard.writeText(text).then(() => alert('已复制！'));
-    }
-
-    loadData();
-  </script>
-</body>
-</html>`;
+  return '<!DOCTYPE html>\n' +
+  '<html lang="zh-CN">\n' +
+  '<head>\n' +
+  '  <meta charset="UTF-8">\n' +
+  '  <title>用户控制台</title>\n' +
+  '  <style>\n' +
+  '    body { font-family: system-ui; background: #f9fafb; margin: 0; padding: 20px; }\n' +
+  '    .container { max-width: 800px; margin: auto; }\n' +
+  '    .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 20px; }\n' +
+  '    input { padding: 8px; border: 1px solid #ddd; border-radius: 4px; }\n' +
+  '    button { background: #3b82f6; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; }\n' +
+  '    button.warning { background: #f59e0b; }\n' +
+  '    table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 14px; }\n' +
+  '    th, td { padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }\n' +
+  '    .header { display: flex; justify-content: space-between; align-items: center; }\n' +
+  '  </style>\n' +
+  '</head>\n' +
+  '<body>\n' +
+  '  <div class="container">\n' +
+  '    <div class="header">\n' +
+  '      <h1>欢迎回来, ' + username + '</h1>\n' +
+  '      <button class="warning" onclick="logout()">退出登录</button>\n' +
+  '    </div>\n' +
+  '    <div class="card">\n' +
+  '      <h2>绑定新 Token</h2>\n' +
+  '      <p>请输入管理员分发给您的 Token 激活码进行绑定：</p>\n' +
+  '      <input type="text" id="bindToken" placeholder="输入 Token">\n' +
+  '      <button onclick="bind()">立即绑定</button>\n' +
+  '    </div>\n' +
+  '    <div class="card">\n' +
+  '      <h2>我的订阅列表</h2>\n' +
+  '      <table>\n' +
+  '        <thead><tr>\n' +
+  '          <th>Token</th>\n' +
+  '          <th>状态/限制</th>\n' +
+  '          <th>过期时间</th>\n' +
+  '          <th>M3U 订阅链接</th>\n' +
+  '          <th>操作</th>\n' +
+  '        </tr></thead>\n' +
+  '        <tbody id="list"></tbody>\n' +
+  '      </table>\n' +
+  '    </div>\n' +
+  '  </div>\n' +
+  '  <script>\n' +
+  '    async function loadData() {\n' +
+  '      const res = await fetch(\'/api/user/tokens\');\n' +
+  '      const data = await res.json();\n' +
+  '      const tbody = document.getElementById(\'list\');\n' +
+  '      let html = \'\';\n' +
+  '      for(let i=0; i<data.length; i++) {\n' +
+  '        let t = data[i];\n' +
+  '        let limitTxt = t.limit === 0 ? \'无限 IP\' : (t.used + \' / \' + t.limit + \' IP\');\n' +
+  '        let subLink = window.location.origin + \'/sub?token=\' + t.token;\n' +
+  '        html += \'<tr>\' +\n' +
+  '          \'<td>\' + t.token + \'</td>\' +\n' +
+  '          \'<td>\' + limitTxt + \'</td>\' +\n' +
+  '          \'<td>\' + t.expireText + \'</td>\' +\n' +
+  '          \'<td><button onclick="copy(\\\'\' + subLink + \'\\\')">复制链接</button></td>\' +\n' +
+  '          \'<td><button class="warning" onclick="resetIp(\\\'\' + t.token + \'\\\')">解除封锁</button></td>\' +\n' +
+  '        \'</tr>\';\n' +
+  '      }\n' +
+  '      tbody.innerHTML = html;\n' +
+  '    }\n' +
+  '    async function bind() {\n' +
+  '      const t = document.getElementById(\'bindToken\').value;\n' +
+  '      if(!t) return;\n' +
+  '      const res = await fetch(\'/api/user/bind\', { method: \'POST\', body: JSON.stringify({token: t}) });\n' +
+  '      const data = await res.json();\n' +
+  '      if(data.success) { alert(\'绑定成功\'); document.getElementById(\'bindToken\').value=\'\'; loadData(); }\n' +
+  '      else alert(data.msg);\n' +
+  '    }\n' +
+  '    async function resetIp(token) {\n' +
+  '      await fetch(\'/api/user/reset_ip\', { method: \'POST\', body: JSON.stringify({token: token}) });\n' +
+  '      alert(\'已重置该 Token 的 IP 记录\');\n' +
+  '      loadData();\n' +
+  '    }\n' +
+  '    async function logout() {\n' +
+  '      await fetch(\'/api/user/logout\', { method: \'POST\' });\n' +
+  '      window.location.href = \'/login\';\n' +
+  '    }\n' +
+  '    function copy(text) {\n' +
+  '      navigator.clipboard.writeText(text).then(() => alert(\'已复制！\'));\n' +
+  '    }\n' +
+  '    loadData();\n' +
+  '  </script>\n' +
+  '</body>\n' +
+  '</html>';
 }
 
 function renderAdminPage() {
-  // 此处与上个版本的管理员后台完全相同
-  return `<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-  <meta charset="UTF-8">
-  <title>管理后台</title>
-  <style>
-    body { font-family: system-ui; background: #f9fafb; margin: 0; padding: 20px; }
-    .container { max-width: 900px; margin: auto; }
-    .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 20px; }
-    input { padding: 8px; border: 1px solid #ddd; border-radius: 4px; }
-    button { background: #10b981; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; }
-    button.danger { background: #ef4444; }
-    button.warning { background: #f59e0b; }
-    table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 14px; }
-    th, td { padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <h1>管理后台</h1>
-    
-    <div class="card">
-      <h2>1. 原始直播源</h2>
-      <p>频道数 <span id="chCount">0</span></p>
-      <input type="text" id="sourceUrl" placeholder="输入 M3U 订阅链接" style="width: 70%;">
-      <button onclick="saveConfig()">保存</button>
-      <button onclick="syncM3U()" style="background:#3b82f6;">立即抓取</button>
-    </div>
-
-    <div class="card">
-      <h2>2. Token 管理 (激活码)</h2>
-      <p style="color:#666; font-size:12px;">给用户分发下方的 Token。IP限制填 0 代表无限IP。</p>
-      <div style="display:flex; gap: 10px; margin-bottom: 10px;">
-        <input type="text" id="newToken" placeholder="生成新 Token" style="flex: 2;">
-        <input type="number" id="newLimit" placeholder="IP限制(0为无限)" value="3" style="flex: 1;">
-        <input type="number" id="expireHours" placeholder="有效期(小时)" style="flex: 1.5;">
-        <button onclick="addToken()" style="flex: 1;">生成</button>
-      </div>
-      
-      <table>
-        <thead><tr>
-          <th>Token</th><th>归属用户</th><th>IP 状态</th><th>过期时间</th><th>操作</th>
-        </tr></thead>
-        <tbody id="tokenList"></tbody>
-      </table>
-    </div>
-  </div>
-
-  <script>
-    async function loadData() {
-      const statusRes = await fetch('/admin/api/status');
-      const status = await statusRes.json();
-      document.getElementById('sourceUrl').value = status.sourceUrl;
-      document.getElementById('chCount').innerText = status.channelCount;
-
-      const tokensRes = await fetch('/admin/api/tokens');
-      const tokens = await tokensRes.json();
-      const tbody = document.getElementById('tokenList');
-      
-      let html = '';
-      for(let i=0; i<tokens.length; i++) {
-        let t = tokens[i];
-        let limitTxt = t.limit === 0 ? '无限' : (t.used + '/' + t.limit);
-        html += '<tr>' +
-          '<td>' + t.token + '</td>' +
-          '<td>' + t.owner + '</td>' +
-          '<td><span title="' + t.ips.join(', ') + '">' + limitTxt + '</span></td>' +
-          '<td>' + t.expireText + '</td>' +
-          '<td>' +
-            '<button class="warning" onclick="resetIp(\\'' + t.token + '\\')" style="margin-right:5px;">清IP</button>' +
-            '<button class="danger" onclick="delToken(\\'' + t.token + '\\')">删</button>' +
-          '</td>' +
-        '</tr>';
-      }
-      tbody.innerHTML = html;
-    }
-
-    async function saveConfig() {
-      const url = document.getElementById('sourceUrl').value;
-      await fetch('/admin/api/config', { method: 'POST', body: JSON.stringify({ sourceUrl: url }) });
-      alert('保存成功');
-    }
-
-    async function syncM3U() {
-      const res = await fetch('/admin/api/sync', { method: 'POST' });
-      const data = await res.json();
-      alert(data.success ? '成功更新频道' : '失败: ' + data.msg);
-      loadData();
-    }
-
-    async function addToken() {
-      const token = document.getElementById('newToken').value;
-      const limit = document.getElementById('newLimit').value;
-      const expireHours = document.getElementById('expireHours').value;
-      if(!token) return alert('请输入 Token');
-      
-      await fetch('/admin/api/token', { method: 'POST', body: JSON.stringify({ token: token, limit: limit, expireHours: expireHours }) });
-      document.getElementById('newToken').value = '';
-      loadData();
-    }
-
-    async function delToken(token) {
-      if(!confirm('确定删除吗？')) return;
-      await fetch('/admin/api/token', { method: 'DELETE', body: JSON.stringify({ token: token }) });
-      loadData();
-    }
-
-    async function resetIp(token) {
-      await fetch('/admin/api/reset_ip', { method: 'POST', body: JSON.stringify({ token: token }) });
-      loadData();
-    }
-
-    loadData();
-  </script>
-</body>
-</html>`;
+  return '<!DOCTYPE html>\n' +
+  '<html lang="zh-CN">\n' +
+  '<head>\n' +
+  '  <meta charset="UTF-8">\n' +
+  '  <title>管理后台</title>\n' +
+  '  <style>\n' +
+  '    body { font-family: system-ui; background: #f9fafb; margin: 0; padding: 20px; }\n' +
+  '    .container { max-width: 900px; margin: auto; }\n' +
+  '    .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 20px; }\n' +
+  '    input { padding: 8px; border: 1px solid #ddd; border-radius: 4px; }\n' +
+  '    button { background: #10b981; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; }\n' +
+  '    button.danger { background: #ef4444; }\n' +
+  '    button.warning { background: #f59e0b; }\n' +
+  '    table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 14px; }\n' +
+  '    th, td { padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }\n' +
+  '  </style>\n' +
+  '</head>\n' +
+  '<body>\n' +
+  '  <div class="container">\n' +
+  '    <h1>管理后台</h1>\n' +
+  '    <div class="card">\n' +
+  '      <h2>1. 原始直播源</h2>\n' +
+  '      <p>频道数 <span id="chCount">0</span></p>\n' +
+  '      <input type="text" id="sourceUrl" placeholder="输入 M3U 订阅链接" style="width: 70%;">\n' +
+  '      <button onclick="saveConfig()">保存</button>\n' +
+  '      <button onclick="syncM3U()" style="background:#3b82f6;">立即抓取</button>\n' +
+  '    </div>\n' +
+  '    <div class="card">\n' +
+  '      <h2>2. Token 管理 (激活码)</h2>\n' +
+  '      <p style="color:#666; font-size:12px;">给用户分发下方的 Token。IP限制填 0 代表无限IP。</p>\n' +
+  '      <div style="display:flex; gap: 10px; margin-bottom: 10px;">\n' +
+  '        <input type="text" id="newToken" placeholder="生成新 Token" style="flex: 2;">\n' +
+  '        <input type="number" id="newLimit" placeholder="IP限制(0为无限)" value="3" style="flex: 1;">\n' +
+  '        <input type="number" id="expireHours" placeholder="有效期(小时)" style="flex: 1.5;">\n' +
+  '        <button onclick="addToken()" style="flex: 1;">生成</button>\n' +
+  '      </div>\n' +
+  '      <table>\n' +
+  '        <thead><tr>\n' +
+  '          <th>Token</th><th>归属用户</th><th>IP 状态</th><th>过期时间</th><th>操作</th>\n' +
+  '        </tr></thead>\n' +
+  '        <tbody id="tokenList"></tbody>\n' +
+  '      </table>\n' +
+  '    </div>\n' +
+  '  </div>\n' +
+  '  <script>\n' +
+  '    async function loadData() {\n' +
+  '      const statusRes = await fetch(\'/admin/api/status\');\n' +
+  '      const status = await statusRes.json();\n' +
+  '      document.getElementById(\'sourceUrl\').value = status.sourceUrl;\n' +
+  '      document.getElementById(\'chCount\').innerText = status.channelCount;\n' +
+  '      const tokensRes = await fetch(\'/admin/api/tokens\');\n' +
+  '      const tokens = await tokensRes.json();\n' +
+  '      const tbody = document.getElementById(\'tokenList\');\n' +
+  '      let html = \'\';\n' +
+  '      for(let i=0; i<tokens.length; i++) {\n' +
+  '        let t = tokens[i];\n' +
+  '        let limitTxt = t.limit === 0 ? \'无限\' : (t.used + \'/\' + t.limit);\n' +
+  '        html += \'<tr>\' +\n' +
+  '          \'<td>\' + t.token + \'</td>\' +\n' +
+  '          \'<td>\' + t.owner + \'</td>\' +\n' +
+  '          \'<td><span title="\' + t.ips.join(\', \') + \'">\' + limitTxt + \'</span></td>\' +\n' +
+  '          \'<td>\' + t.expireText + \'</td>\' +\n' +
+  '          \'<td>\' +\n' +
+  '            \'<button class="warning" onclick="resetIp(\\\'\' + t.token + \'\\\')" style="margin-right:5px;">清IP</button>\' +\n' +
+  '            \'<button class="danger" onclick="delToken(\\\'\' + t.token + \'\\\')">删</button>\' +\n' +
+  '          \'</td>\' +\n' +
+  '        \'</tr>\';\n' +
+  '      }\n' +
+  '      tbody.innerHTML = html;\n' +
+  '    }\n' +
+  '    async function saveConfig() {\n' +
+  '      const url = document.getElementById(\'sourceUrl\').value;\n' +
+  '      await fetch(\'/admin/api/config\', { method: \'POST\', body: JSON.stringify({ sourceUrl: url }) });\n' +
+  '      alert(\'保存成功\');\n' +
+  '    }\n' +
+  '    async function syncM3U() {\n' +
+  '      const res = await fetch(\'/admin/api/sync\', { method: \'POST\' });\n' +
+  '      const data = await res.json();\n' +
+  '      alert(data.success ? \'成功更新频道\' : \'失败: \' + data.msg);\n' +
+  '      loadData();\n' +
+  '    }\n' +
+  '    async function addToken() {\n' +
+  '      const token = document.getElementById(\'newToken\').value;\n' +
+  '      const limit = document.getElementById(\'newLimit\').value;\n' +
+  '      const expireHours = document.getElementById(\'expireHours\').value;\n' +
+  '      if(!token) return alert(\'请输入 Token\');\n' +
+  '      await fetch(\'/admin/api/token\', { method: \'POST\', body: JSON.stringify({ token: token, limit: limit, expireHours: expireHours }) });\n' +
+  '      document.getElementById(\'newToken\').value = \'\';\n' +
+  '      loadData();\n' +
+  '    }\n' +
+  '    async function delToken(token) {\n' +
+  '      if(!confirm(\'确定删除吗？\')) return;\n' +
+  '      await fetch(\'/admin/api/token\', { method: \'DELETE\', body: JSON.stringify({ token: token }) });\n' +
+  '      loadData();\n' +
+  '    }\n' +
+  '    async function resetIp(token) {\n' +
+  '      await fetch(\'/admin/api/reset_ip\', { method: \'POST\', body: JSON.stringify({ token: token }) });\n' +
+  '      loadData();\n' +
+  '    }\n' +
+  '    loadData();\n' +
+  '  </script>\n' +
+  '</body>\n' +
+  '</html>';
 }
